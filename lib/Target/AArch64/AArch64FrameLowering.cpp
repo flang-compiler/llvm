@@ -94,6 +94,7 @@
 #include "AArch64InstrInfo.h"
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64RegisterInfo.h"
+#include "AArch64StackOffset.h"
 #include "AArch64Subtarget.h"
 #include "AArch64TargetMachine.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
@@ -173,7 +174,7 @@ static unsigned estimateRSStackSizeLimit(MachineFunction &MF) {
         if (!MO.isFI())
           continue;
 
-        int Offset = 0;
+        StackOffset Offset;
         if (isAArch64FrameOffsetLegal(MI, Offset, nullptr, nullptr, nullptr) ==
             AArch64FrameOffsetCannotUpdate)
           return 0;
@@ -193,7 +194,7 @@ bool AArch64FrameLowering::canUseRedZone(const MachineFunction &MF) const {
 
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
-  unsigned NumBytes = AFI->getLocalStackSize();
+  uint64_t NumBytes = AFI->getLocalStackSize();
 
   return !(MFI.hasCalls() || hasFP(MF) || NumBytes > 128);
 }
@@ -273,14 +274,15 @@ MachineBasicBlock::iterator AArch64FrameLowering::eliminateCallFramePseudoInstr(
       // Most call frames will be allocated at the start of a function so
       // this is OK, but it is a limitation that needs dealing with.
       assert(Amount > -0xffffff && Amount < 0xffffff && "call frame too large");
-      emitFrameOffset(MBB, I, DL, AArch64::SP, AArch64::SP, Amount, TII);
+      emitFrameOffset(MBB, I, DL, AArch64::SP, AArch64::SP, {Amount, MVT::i8},
+                      TII);
     }
   } else if (CalleePopAmount != 0) {
     // If the calling convention demands that the callee pops arguments from the
     // stack, we want to add it back if we have a reserved call frame.
     assert(CalleePopAmount < 0xffffff && "call frame too large");
-    emitFrameOffset(MBB, I, DL, AArch64::SP, AArch64::SP, -CalleePopAmount,
-                    TII);
+    emitFrameOffset(MBB, I, DL, AArch64::SP, AArch64::SP,
+                    {-(int64_t)CalleePopAmount, MVT::i8}, TII);
   }
   return MBB.erase(I);
 }
@@ -393,7 +395,7 @@ bool AArch64FrameLowering::canUseAsPrologue(
 }
 
 static bool windowsRequiresStackProbe(MachineFunction &MF,
-                                      unsigned StackSizeInBytes) {
+                                      uint64_t StackSizeInBytes) {
   const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
   if (!Subtarget.isTargetWindows())
     return false;
@@ -410,7 +412,7 @@ static bool windowsRequiresStackProbe(MachineFunction &MF,
 }
 
 bool AArch64FrameLowering::shouldCombineCSRLocalStackBump(
-    MachineFunction &MF, unsigned StackBumpBytes) const {
+    MachineFunction &MF, uint64_t StackBumpBytes) const {
   AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
@@ -684,7 +686,7 @@ static MachineBasicBlock::iterator convertCalleeSaveRestoreToSPPrePostIncDec(
 // Fixup callee-save register save/restore instructions to take into account
 // combined SP bump by adding the local stack size to the stack offsets.
 static void fixupCalleeSaveRestoreStackOffset(MachineInstr &MI,
-                                              unsigned LocalStackSize,
+                                              uint64_t LocalStackSize,
                                               bool NeedsWinCFI,
                                               bool *HasWinCFI) {
   if (AArch64InstrInfo::isSEHInstruction(MI))
@@ -852,8 +854,8 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
   // pointer from the funclet.  We only save the callee saved registers in the
   // funclet, which are really the callee saved registers of the parent
   // function, including the funclet.
-  int NumBytes = IsFunclet ? (int)getWinEHFuncletFrameSize(MF)
-                           : (int)MFI.getStackSize();
+  int64_t NumBytes = IsFunclet ? getWinEHFuncletFrameSize(MF)
+                               : MFI.getStackSize();
   if (!AFI->hasStackFrame() && !windowsRequiresStackProbe(MF, NumBytes)) {
     assert(!HasFP && "unexpected function without stack frame but with FP");
     // All of the stack allocation is for locals.
@@ -866,8 +868,9 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
       AFI->setHasRedZone(true);
       ++NumRedZoneFunctions;
     } else {
-      emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP, -NumBytes, TII,
-                      MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI);
+      emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP,
+                      {-NumBytes, MVT::i8}, TII, MachineInstr::FrameSetup,
+                      false, NeedsWinCFI, &HasWinCFI);
       if (!NeedsWinCFI) {
         // Label used to tie together the PROLOG_LABEL and the MachineMoves.
         MCSymbol *FrameLabel = MMI.getContext().createTempSymbol();
@@ -901,8 +904,9 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
   AFI->setLocalStackSize(NumBytes - PrologueSaveSize);
   bool CombineSPBump = shouldCombineCSRLocalStackBump(MF, NumBytes);
   if (CombineSPBump) {
-    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP, -NumBytes, TII,
-                    MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP,
+                    {-NumBytes, MVT::i8}, TII, MachineInstr::FrameSetup, false,
+                    NeedsWinCFI, &HasWinCFI);
     NumBytes = 0;
   } else if (PrologueSaveSize != 0) {
     MBBI = convertCalleeSaveRestoreToSPPrePostIncDec(
@@ -950,7 +954,7 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
   if (HasFP) {
     // Only set up FP if we actually need to. Frame pointer is fp =
     // sp - fixedobject - 16.
-    int FPOffset = AFI->getCalleeSavedStackSize() - 16;
+    int64_t FPOffset = AFI->getCalleeSavedStackSize() - 16;
     if (CombineSPBump)
       FPOffset += AFI->getLocalStackSize();
 
@@ -958,12 +962,13 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
     //          mov fp,sp          when FPOffset is zero.
     // Note: All stores of callee-saved registers are marked as "FrameSetup".
     // This code marks the instruction(s) that set the FP also.
-    emitFrameOffset(MBB, MBBI, DL, AArch64::FP, AArch64::SP, FPOffset, TII,
-                    MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::FP, AArch64::SP,
+                    {FPOffset, MVT::i8}, TII, MachineInstr::FrameSetup, false,
+                    NeedsWinCFI, &HasWinCFI);
   }
 
   if (windowsRequiresStackProbe(MF, NumBytes)) {
-    uint32_t NumWords = NumBytes >> 4;
+    uint64_t NumWords = NumBytes >> 4;
     if (NeedsWinCFI) {
       HasWinCFI = true;
       // alloc_l can hold at most 256MB, so assume that NumBytes doesn't
@@ -1071,8 +1076,9 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
       // FIXME: in the case of dynamic re-alignment, NumBytes doesn't have
       // the correct value here, as NumBytes also includes padding bytes,
       // which shouldn't be counted here.
-      emitFrameOffset(MBB, MBBI, DL, scratchSPReg, AArch64::SP, -NumBytes, TII,
-                      MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI);
+      emitFrameOffset(MBB, MBBI, DL, scratchSPReg, AArch64::SP,
+                      {-NumBytes, MVT::i8}, TII, MachineInstr::FrameSetup,
+                      false, NeedsWinCFI, &HasWinCFI);
 
     if (NeedsRealignment) {
       const unsigned Alignment = MFI.getMaxAlignment();
@@ -1286,8 +1292,8 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
     IsFunclet = isFuncletReturnInstr(*MBBI);
   }
 
-  int NumBytes = IsFunclet ? (int)getWinEHFuncletFrameSize(MF)
-                           : MFI.getStackSize();
+  int64_t NumBytes = IsFunclet ? getWinEHFuncletFrameSize(MF)
+                               : MFI.getStackSize();
   AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
 
   // All calls are tail calls in GHC calling conv, and functions have no
@@ -1404,8 +1410,8 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   // If there is a single SP update, insert it before the ret and we're done.
   if (CombineSPBump) {
     emitFrameOffset(MBB, MBB.getFirstTerminator(), DL, AArch64::SP, AArch64::SP,
-                    NumBytes + AfterCSRPopSize, TII, MachineInstr::FrameDestroy,
-                    false, NeedsWinCFI, &HasWinCFI);
+                    {NumBytes + (int64_t)AfterCSRPopSize, MVT::i8}, TII,
+                    MachineInstr::FrameDestroy, false, NeedsWinCFI, &HasWinCFI);
     if (NeedsWinCFI && HasWinCFI)
       BuildMI(MBB, MBB.getFirstTerminator(), DL,
               TII->get(AArch64::SEH_EpilogEnd))
@@ -1424,7 +1430,7 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
       return;
 
     bool NoCalleeSaveRestore = PrologueSaveSize == 0;
-    int StackRestoreBytes = RedZone ? 0 : NumBytes;
+    int64_t StackRestoreBytes = RedZone ? 0 : NumBytes;
     if (NoCalleeSaveRestore)
       StackRestoreBytes += AfterCSRPopSize;
 
@@ -1437,8 +1443,8 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
       adaptForLdStOpt(MBB, MBB.getFirstTerminator(), LastPopI);
 
     emitFrameOffset(MBB, LastPopI, DL, AArch64::SP, AArch64::SP,
-                    StackRestoreBytes, TII, MachineInstr::FrameDestroy, false,
-                    NeedsWinCFI, &HasWinCFI);
+                    {StackRestoreBytes, MVT::i8}, TII,
+                    MachineInstr::FrameDestroy, false, NeedsWinCFI, &HasWinCFI);
     if (Done) {
       if (NeedsWinCFI) {
         HasWinCFI = true;
@@ -1458,11 +1464,12 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   // be able to save any instructions.
   if (!IsFunclet && (MFI.hasVarSizedObjects() || AFI->isStackRealigned()))
     emitFrameOffset(MBB, LastPopI, DL, AArch64::SP, AArch64::FP,
-                    -AFI->getCalleeSavedStackSize() + 16, TII,
-                    MachineInstr::FrameDestroy, false, NeedsWinCFI);
+                    {-(int64_t)AFI->getCalleeSavedStackSize() + 16, MVT::i8},
+                    TII, MachineInstr::FrameDestroy, false, NeedsWinCFI);
   else if (NumBytes)
-    emitFrameOffset(MBB, LastPopI, DL, AArch64::SP, AArch64::SP, NumBytes, TII,
-                    MachineInstr::FrameDestroy, false, NeedsWinCFI);
+    emitFrameOffset(MBB, LastPopI, DL, AArch64::SP, AArch64::SP,
+                    {NumBytes, MVT::i8}, TII, MachineInstr::FrameDestroy, false,
+                    NeedsWinCFI);
 
   // This must be placed after the callee-save restore code because that code
   // assumes the SP is at the same location as it was after the callee-save save
@@ -1483,8 +1490,8 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
     adaptForLdStOpt(MBB, FirstSPPopI, LastPopI);
 
     emitFrameOffset(MBB, FirstSPPopI, DL, AArch64::SP, AArch64::SP,
-                    AfterCSRPopSize, TII, MachineInstr::FrameDestroy, false,
-                    NeedsWinCFI, &HasWinCFI);
+                    {(int64_t)AfterCSRPopSize, MVT::i8}, TII,
+                    MachineInstr::FrameDestroy, false, NeedsWinCFI, &HasWinCFI);
   }
   if (NeedsWinCFI && HasWinCFI)
     BuildMI(MBB, MBB.getFirstTerminator(), DL, TII->get(AArch64::SEH_EpilogEnd))
@@ -1501,10 +1508,11 @@ int AArch64FrameLowering::getFrameIndexReference(const MachineFunction &MF,
                                                  int FI,
                                                  unsigned &FrameReg) const {
   return resolveFrameIndexReference(
-      MF, FI, FrameReg,
-      /*PreferFP=*/
-      MF.getFunction().hasFnAttribute(Attribute::SanitizeHWAddress),
-      /*ForSimm=*/false);
+             MF, FI, FrameReg,
+             /*PreferFP=*/
+             MF.getFunction().hasFnAttribute(Attribute::SanitizeHWAddress),
+             /*ForSimm=*/false)
+      .getBytes();
 }
 
 int AArch64FrameLowering::getNonLocalFrameIndexReference(
@@ -1512,18 +1520,18 @@ int AArch64FrameLowering::getNonLocalFrameIndexReference(
   return getSEHFrameIndexOffset(MF, FI);
 }
 
-static int getFPOffset(const MachineFunction &MF, int ObjectOffset) {
+static StackOffset getFPOffset(const MachineFunction &MF, int64_t ObjectOffset) {
   const auto *AFI = MF.getInfo<AArch64FunctionInfo>();
   const auto &Subtarget = MF.getSubtarget<AArch64Subtarget>();
   bool IsWin64 =
       Subtarget.isCallingConvWin64(MF.getFunction().getCallingConv());
   unsigned FixedObject = IsWin64 ? alignTo(AFI->getVarArgsGPRSize(), 16) : 0;
-  return ObjectOffset + FixedObject + 16;
+  return {ObjectOffset + FixedObject + 16, MVT::i8};
 }
 
-static int getStackOffset(const MachineFunction &MF, int ObjectOffset) {
+static StackOffset getStackOffset(const MachineFunction &MF, int64_t ObjectOffset) {
   const auto &MFI = MF.getFrameInfo();
-  return ObjectOffset + MFI.getStackSize();
+  return {ObjectOffset + (int64_t)MFI.getStackSize(), MVT::i8};
 }
 
 int AArch64FrameLowering::getSEHFrameIndexOffset(const MachineFunction &MF,
@@ -1532,23 +1540,22 @@ int AArch64FrameLowering::getSEHFrameIndexOffset(const MachineFunction &MF,
       MF.getSubtarget().getRegisterInfo());
   int ObjectOffset = MF.getFrameInfo().getObjectOffset(FI);
   return RegInfo->getLocalAddressRegister(MF) == AArch64::FP
-             ? getFPOffset(MF, ObjectOffset)
-             : getStackOffset(MF, ObjectOffset);
+             ? getFPOffset(MF, ObjectOffset).getBytes()
+             : getStackOffset(MF, ObjectOffset).getBytes();
 }
 
-int AArch64FrameLowering::resolveFrameIndexReference(const MachineFunction &MF,
-                                                     int FI, unsigned &FrameReg,
-                                                     bool PreferFP,
-                                                     bool ForSimm) const {
+StackOffset AArch64FrameLowering::resolveFrameIndexReference(
+    const MachineFunction &MF, int FI, unsigned &FrameReg, bool PreferFP,
+    bool ForSimm) const {
   const auto &MFI = MF.getFrameInfo();
-  int ObjectOffset = MFI.getObjectOffset(FI);
+  int64_t ObjectOffset = MFI.getObjectOffset(FI);
   bool isFixed = MFI.isFixedObjectIndex(FI);
   return resolveFrameOffsetReference(MF, ObjectOffset, isFixed, FrameReg,
                                      PreferFP, ForSimm);
 }
 
-int AArch64FrameLowering::resolveFrameOffsetReference(
-    const MachineFunction &MF, int ObjectOffset, bool isFixed,
+StackOffset AArch64FrameLowering::resolveFrameOffsetReference(
+    const MachineFunction &MF, int64_t ObjectOffset, bool isFixed,
     unsigned &FrameReg, bool PreferFP, bool ForSimm) const {
   const auto &MFI = MF.getFrameInfo();
   const auto *RegInfo = static_cast<const AArch64RegisterInfo *>(
@@ -1556,8 +1563,8 @@ int AArch64FrameLowering::resolveFrameOffsetReference(
   const auto *AFI = MF.getInfo<AArch64FunctionInfo>();
   const auto &Subtarget = MF.getSubtarget<AArch64Subtarget>();
 
-  int FPOffset = getFPOffset(MF, ObjectOffset);
-  int Offset = getStackOffset(MF, ObjectOffset);
+  int64_t FPOffset = getFPOffset(MF, ObjectOffset).getBytes();
+  int64_t Offset = getStackOffset(MF, ObjectOffset).getBytes();
   bool isCSR =
       !isFixed && ObjectOffset >= -((int)AFI->getCalleeSavedStackSize());
 
@@ -1627,7 +1634,7 @@ int AArch64FrameLowering::resolveFrameOffsetReference(
 
   if (UseFP) {
     FrameReg = RegInfo->getFrameRegister(MF);
-    return FPOffset;
+    return StackOffset(FPOffset, MVT::i8);
   }
 
   // Use the base pointer if we have one.
@@ -1644,7 +1651,7 @@ int AArch64FrameLowering::resolveFrameOffsetReference(
       Offset -= AFI->getLocalStackSize();
   }
 
-  return Offset;
+  return StackOffset(Offset, MVT::i8);
 }
 
 static unsigned getPrologueDeath(MachineFunction &MF, unsigned Reg) {
@@ -2106,7 +2113,7 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   unsigned NumSavedRegs = SavedRegs.count();
 
   // The frame record needs to be created by saving the appropriate registers
-  unsigned EstimatedStackSize = MFI.estimateStackSize(MF);
+  uint64_t EstimatedStackSize = MFI.estimateStackSize(MF);
   if (hasFP(MF) ||
       windowsRequiresStackProbe(MF, EstimatedStackSize + CSStackSize + 16)) {
     SavedRegs.set(AArch64::FP);
@@ -2164,7 +2171,7 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
 
   // Adding the size of additional 64bit GPR saves.
   CSStackSize += 8 * (SavedRegs.count() - NumSavedRegs);
-  unsigned AlignedCSStackSize = alignTo(CSStackSize, 16);
+  uint64_t AlignedCSStackSize = alignTo(CSStackSize, 16);
   LLVM_DEBUG(dbgs() << "Estimated stack frame size: "
                << EstimatedStackSize + AlignedCSStackSize
                << " bytes.\n");
