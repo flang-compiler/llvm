@@ -4769,6 +4769,9 @@ The current supported opcode vocabulary is limited:
   ``DW_OP_entry_value`` may also appear after the ``AsmPrinter`` pass when
   a call site parameter value (``DW_AT_call_site_parameter_value``)
   is represented as entry value of the parameter.
+- ``DW_OP_push_object_address`` pushes the address of the object which can then
+  serve as a descriptor in subsequent calculation. This opcode can be used to
+  calculate bounds of fortran allocatable array which has array descriptors.
 
 DWARF specifies three kinds of simple location descriptions: Register, memory,
 and implicit location descriptions.  Note that a location description is
