@@ -1014,6 +1014,11 @@ void Verifier::visitDICompositeType(const DICompositeType &N) {
     AssertDI(isa<DIDerivedType>(D) && N.getTag() == dwarf::DW_TAG_variant_part,
              "discriminator can only appear on variant part");
   }
+
+  if (N.getRawDataLocation()) {
+    AssertDI(N.getTag() == dwarf::DW_TAG_array_type,
+             "dataLocation can only appear in array type");
+  }
 }
 
 void Verifier::visitDIFortranArrayType(const DIFortranArrayType &N) {
