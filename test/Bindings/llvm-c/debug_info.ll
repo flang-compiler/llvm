@@ -48,7 +48,7 @@
 ; CHECK-NEXT: !22 = !{!11, !11, !23}
 ; CHECK-NEXT: !23 = !DICompositeType(tag: DW_TAG_array_type, baseType: !11, size: 640, flags: DIFlagVector, elements: !24)
 ; CHECK-NEXT: !24 = !{!25}
-; CHECK-NEXT: !25 = !DISubrange(count: 10)
+; CHECK-NEXT: !25 = !DISubrange(count: 10, lowerBound: 0)
 ; CHECK-NEXT: !26 = !{!27, !28, !29, !30}
 ; CHECK-NEXT: !27 = !DILocalVariable(name: "a", arg: 1, scope: !20, file: !1, line: 42, type: !11)
 ; CHECK-NEXT: !28 = !DILocalVariable(name: "b", arg: 2, scope: !20, file: !1, line: 42, type: !11)
