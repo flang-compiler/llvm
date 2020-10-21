@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ release_90 ]
+  schedule:
+    # Github only holds artifacts for 90 days, so run the job also
+    # at 00:00 on day-of-month 1 in every 2nd month from January through December.
+    - cron: '0 0 1 1/2 *'
+    
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        target: [X86, AArch64, PowerPC]
+
+    steps:
+      - name: Check tools
+        run: |
+          pwd
+          git --version
+          cmake --version
+          make --version
+          gcc --version
+          
+      - name: Build llvm
+        run: |
+          # exit the llvm dir, so the path is the same on subsequent projects
+          cd ../..
+          rm -rf llvm
+          # clone manually, because checkout does not allow exiting llvm dir
+          git clone --depth 1 --single-branch --branch release_90 https://github.com/flang-compiler/llvm.git
+          cd llvm
+          # After build place the artifacts in llvm/llvm, so Upload can find them.
+          mkdir llvm
+          CMAKE_OPTIONS="-DLLVM_TARGETS_TO_BUILD=${{ matrix.target }} \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=/usr/bin/gcc-9 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/g++-9"
+          mkdir -p build && cd build
+          cmake $CMAKE_OPTIONS ..
+          make -j$(nproc)
+          # Install so the flang-driver can be built
+          sudo make install
+          
+          # Archive the source + build directories for future installation
+          cd ../..
+          tar -zcf llvm_build.tar.gz llvm
+          # Upload will only look in $GITHUB_WORKSPACE or its subdirs.
+          mv llvm_build.tar.gz llvm/llvm/.
+      
+      - name: Upload llvm
+        uses: actions/upload-artifact@v2
+        with:
+          name: llvm_build_${{ matrix.target }}
+          path: llvm_build.tar.gz
