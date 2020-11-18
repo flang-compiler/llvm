@@ -296,6 +296,9 @@ private:
                           SmallVectorImpl<uint64_t> &Record, unsigned &Abbrev);
   void writeDISubrange(const DISubrange *N, SmallVectorImpl<uint64_t> &Record,
                        unsigned Abbrev);
+  void writeDIGenericSubrange(const DIGenericSubrange *N,
+                              SmallVectorImpl<uint64_t> &Record,
+                              unsigned Abbrev);
   void writeDIFortranSubrange(const DIFortranSubrange *N,
                               SmallVectorImpl<uint64_t> &Record,
                               unsigned Abbrev);
@@ -2321,6 +2324,19 @@ void ModuleBitcodeWriter::writeSyncScopeNames() {
   }
 
   Stream.ExitBlock();
+}
+
+void ModuleBitcodeWriter::writeDIGenericSubrange(
+    const DIGenericSubrange *N, SmallVectorImpl<uint64_t> &Record,
+    unsigned Abbrev) {
+  Record.push_back((uint64_t)N->isDistinct());
+  Record.push_back(VE.getMetadataOrNullID(N->getRawCountNode()));
+  Record.push_back(VE.getMetadataOrNullID(N->getRawLowerBound()));
+  Record.push_back(VE.getMetadataOrNullID(N->getRawUpperBound()));
+  Record.push_back(VE.getMetadataOrNullID(N->getRawStride()));
+
+  Stream.EmitRecord(bitc::METADATA_GENERIC_SUBRANGE, Record, Abbrev);
+  Record.clear();
 }
 
 static void emitSignedInt64(SmallVectorImpl<uint64_t> &Vals, uint64_t V) {
